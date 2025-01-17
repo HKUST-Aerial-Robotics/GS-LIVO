@@ -8,13 +8,13 @@ This repository shows the experimental results of our GS-LIVO system running on 
 
 GS-LIVO (Gaussian Splatting LiDAR-Inertial-Visual Odometry) is a novel SLAM framework that seamlessly integrates LiDAR, inertial, and visual sensors. The system comprises four key modules:
 
-<img src="./pdf/Overview.pdf" width="100%" />
+<img src="./pdf/Overview.png" width="100%" />
 
 1. **Global Gaussian Map**: A spatial hash-indexed octree structure that efficiently covers sparse spatial volumes while adapting to various environmental details and scales. This structure enables effective management of large-scale environments with minimal memory overhead.
 
 2. **Gaussian Initialization and Optimization**: The system performs rapid initialization of Gaussians using both LiDAR and visual information, followed by online optimization using photometric gradients. This dual-sensor approach ensures robust and accurate scene representation.
 
-<img src="./pdf/iGM.pdf" width="100%" />
+<img src="./pdf/iGM.png" width="100%" />
 
 3. **Sliding Window Management**: To maintain real-time performance, GS-LIVO employs an innovative sliding window approach for Gaussian maintenance. This includes:
    - Efficient memory management between CPU and GPU
