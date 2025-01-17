@@ -36,7 +36,6 @@ Key advantages of our approach include:
 ## Hardware & Platform Clarification
 - **Car Platform & Handheld Platform**: Tested on **Jetson Orin NX (16GB)**
 
-### SLAM Process
 <img src="./gif/device.gif" width="100%" />
 
 - **Other Datasets (MARS-LVIG, Landmark, UAV, HKU)**: Tested on a **PC with NVIDIA RTX 4090**
