@@ -99,8 +99,12 @@ if(GSVIZ_CPP_DIR)
   message(STATUS "gsviz viewer bridge: ${GSVIZ_CPP_DIR}")
 endif()
 
+# Gaussian map (hash-indexed octree + sliding window, Sec. II-A..C)
+add_library(gs_map src/gs_map.cpp)
+target_link_libraries(gs_map ${LIB3DGS_LIBRARY} ${TORCH_LIBRARIES})
+
 add_library(vio src/vio.cpp src/frame.cpp src/visual_point.cpp)
-target_link_libraries(vio ${LIB3DGS_LIBRARY} ${JSONCPP_LIBRARIES})
+target_link_libraries(vio gs_map ${LIB3DGS_LIBRARY} ${JSONCPP_LIBRARIES})
 add_library(lio src/voxel_map.cpp)
 add_library(pre src/preprocess.cpp)
 add_library(imu_proc src/IMU_Processing.cpp)
@@ -108,7 +112,7 @@ add_library(laser_mapping src/LIVMapper.cpp)
 
 add_executable(fastlivo_mapping src/main.cpp)
 target_link_libraries(fastlivo_mapping
-  laser_mapping vio lio pre imu_proc
+  laser_mapping vio gs_map lio pre imu_proc
   ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${Sophus_LIBRARIES} ${Boost_LIBRARIES}
   ${TORCH_LIBRARIES} ${JSONCPP_LIBRARIES}
 )

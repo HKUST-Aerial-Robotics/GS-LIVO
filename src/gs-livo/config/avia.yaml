@@ -41,7 +41,7 @@ vio:
   normal_en: true
   raycast_en: false
   inverse_composition_en: false
-  exposure_estimate_en: true
+  exposure_estimate_en: false  # the rendered map is the photometric reference
   inv_expo_cov: 0.1
 
 imu:
@@ -93,14 +93,28 @@ pcd_save:
 
 
 gs:
-  gs_iterations: 40
-  gs_position_lr: 0.01
-  gs_feature_lr: 0.01
-  gs_opacity_lr: 0.1
-  gs_scaling_lr: 1.8
-  gs_rotation_lr: 0.01
-
-scale_factor: 0.035
-GS_voxel_size: 1
-root_voxel_size: 0.01
-octree_max_level: 3
+  # Global Gaussian map: hash-indexed octree (Sec. II-A). Paper: (0.06 m, 2 layers) indoor, (0.5 m, 2 layers) outdoor.
+  root_voxel_size: 0.2      # CBD_Building_01: 0.06 m overflows the 100k window (see README)
+  max_layer: 2
+  leaf_capacity: 1          # Gaussians per leaf voxel
+  # LiDAR-camera initialization (Sec. II-B.1, Eq. 2-3)
+  scale_factor: 0.5         # tangential std-dev = scale_factor * leaf edge
+  thickness: 0.002          # s_delta across the surface [m]
+  init_opacity: 0.9
+  min_depth: 0.3
+  max_depth: 50.0
+  # Sliding window + optimization (Sec. II-B.2, II-C); paper: 100k Gaussians, 10 iterations per frame
+  max_window: 100000
+  iterations: 10
+  lr_xyz: 0.0001
+  lr_scale: 0.005
+  lr_rot: 0.001
+  lr_color: 0.005
+  lr_opacity: 0.025
+  max_scale_ratio: 3.0
+  # Photometric IESKF update against the rendered map (Sec. II-D)
+  visual_update_en: true
+  meas_grid: 16             # one measurement point per 16x16 pixels
+  min_alpha: 0.95
+  render_every: 5           # refresh the rendered image / PSNR log every n frames
+  save_ply: ""              # write the whole map as a 3DGS PLY on shutdown

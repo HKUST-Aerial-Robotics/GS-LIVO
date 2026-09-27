@@ -101,21 +101,12 @@ public:
 
 
 
-  // 3dgs parameters
-  double scale_factor,scale_factor2,normal_rejecter;
-  int save_GS_iter;
-  double root_voxel_size;
-  int octree_max_level;
-  double photometric_thre;
-  int gs_iterations= 0;
-  int border_gs=0;
-  int plot_gs_render=0;
-  double gs_position_lr= 0.0;
-  double gs_feature_lr= 0.0;
-  double gs_opacity_lr= 0.0;
-  double gs_scaling_lr= 0.00;
-  double gs_rotation_lr= 0.0;
-  // 3dgs parameters
+  // Gaussian map parameters (gs/* in the config)
+  gslivo::GSMapParams gs_params;
+  bool gs_visual_update_en = true;
+  int gs_meas_grid = 16, gs_render_every = 5;
+  double gs_min_alpha = 0.95;
+  string gs_save_ply;
 
 
 

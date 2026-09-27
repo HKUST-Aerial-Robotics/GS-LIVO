@@ -112,26 +112,29 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
 
 
-  // 3dgs parameters
-// sheng launch 读取参数
-
-  nh.param<double>("scale_factor", scale_factor, 3.4);
-  nh.param<double>("scale_factor2", scale_factor2, 3.4);
-  nh.param<double>("root_voxel_size", root_voxel_size, 0.5);
-  nh.param<int>("octree_max_level", octree_max_level, 3);
-  nh.param<double>("normal_rejecter", normal_rejecter, 0.1);  // was left uninitialized
-  nh.param<int>("save_GS_iter", save_GS_iter, -1);  // was left uninitialized
-
-  nh.param<int>("gs/gs_iterations", gs_iterations, 4);
-  nh.param<int>("gs/border_gs",  border_gs, 4);
-  nh.param<int>("gs/plot_gs_render", plot_gs_render, 0);
-  nh.param<double>("gs/gs_position_lr", gs_position_lr, 0.00016);
-  nh.param<double>("gs/gs_feature_lr", gs_feature_lr, 0.005);
-  nh.param<double>("gs/gs_opacity_lr", gs_opacity_lr, 0.05);
-  nh.param<double>("gs/gs_scaling_lr", gs_scaling_lr,0.001);
-  nh.param<double>("gs/gs_rotation_lr", gs_rotation_lr, 0.001);
-  
-// 3dgs parameters
+  // Gaussian map (gs_map.h)
+  gslivo::GSMapParams &g = gs_params;
+  nh.param<double>("gs/root_voxel_size", g.root_voxel_size, g.root_voxel_size);
+  nh.param<int>("gs/max_layer", g.max_layer, g.max_layer);
+  nh.param<int>("gs/leaf_capacity", g.leaf_capacity, g.leaf_capacity);
+  nh.param<double>("gs/scale_factor", g.scale_factor, g.scale_factor);
+  nh.param<double>("gs/thickness", g.thickness, g.thickness);
+  nh.param<double>("gs/init_opacity", g.init_opacity, g.init_opacity);
+  nh.param<double>("gs/min_depth", g.min_depth, g.min_depth);
+  nh.param<double>("gs/max_depth", g.max_depth, g.max_depth);
+  nh.param<int>("gs/max_window", g.max_window, g.max_window);
+  nh.param<int>("gs/iterations", g.iterations, g.iterations);
+  nh.param<double>("gs/lr_xyz", g.lr_xyz, g.lr_xyz);
+  nh.param<double>("gs/lr_scale", g.lr_scale, g.lr_scale);
+  nh.param<double>("gs/lr_rot", g.lr_rot, g.lr_rot);
+  nh.param<double>("gs/lr_color", g.lr_color, g.lr_color);
+  nh.param<double>("gs/lr_opacity", g.lr_opacity, g.lr_opacity);
+  nh.param<double>("gs/max_scale_ratio", g.max_scale_ratio, g.max_scale_ratio);
+  nh.param<bool>("gs/visual_update_en", gs_visual_update_en, true);
+  nh.param<int>("gs/meas_grid", gs_meas_grid, 16);
+  nh.param<double>("gs/min_alpha", gs_min_alpha, 0.95);
+  nh.param<int>("gs/render_every", gs_render_every, 5);
+  nh.param<string>("gs/save_ply", gs_save_ply, "");
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
@@ -166,22 +169,11 @@ void LIVMapper::initializeComponents()
   vio_manager->colmap_output_en = colmap_output_en;
 
 
-  // 3dgs parameters
-  vio_manager->scale_factor= (scale_factor);
-  vio_manager->scale_factor2= (root_voxel_size/octree_max_level)*scale_factor;
-  vio_manager->normal_rejecter= (normal_rejecter);
-  vio_manager->save_GS_iter=save_GS_iter;
-  vio_manager->root_voxel_size= root_voxel_size;
-  vio_manager->octree_max_level= octree_max_level;
-  vio_manager->gs_params.iterations = gs_iterations;
-  vio_manager->plot_gs_render = plot_gs_render;
-  vio_manager->gs_params.position_lr_init = gs_position_lr;
-  vio_manager->gs_params.feature_lr = gs_feature_lr;
-  vio_manager->gs_params.opacity_lr = gs_opacity_lr;
-  vio_manager->gs_params.scaling_lr = gs_scaling_lr;
-  vio_manager->gs_params.rotation_lr = gs_rotation_lr;
-  // vio_manager->border_gs = border_gs;
-  // 3dgs parameters
+  vio_manager->gs_params = gs_params;
+  vio_manager->gs_visual_update_en = gs_visual_update_en;
+  vio_manager->gs_meas_grid = gs_meas_grid;
+  vio_manager->gs_min_alpha = gs_min_alpha;
+  vio_manager->gs_render_every = gs_render_every;
 
 
 
@@ -343,7 +335,26 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
-  vio_manager->processFrameGS(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  // dense scan (world, LIO pose) with the normals of the LIO voxel-map planes (Eq. 3)
+  std::vector<gslivo::InitPoint> gs_scan;
+  gs_scan.reserve(pcl_w_wait_pub->points.size());
+  const double lio_voxel = voxelmap_manager->config_setting_.max_voxel_size_;
+  for (const PointType &pt : pcl_w_wait_pub->points)
+  {
+    gslivo::InitPoint ip;
+    ip.p_w = V3D(pt.x, pt.y, pt.z);
+    ip.n_w = V3D::Zero();
+    const VOXEL_LOCATION key(static_cast<int64_t>(std::floor(ip.p_w[0] / lio_voxel)), static_cast<int64_t>(std::floor(ip.p_w[1] / lio_voxel)),
+                             static_cast<int64_t>(std::floor(ip.p_w[2] / lio_voxel)));
+    auto it = voxelmap_manager->voxel_map_.find(key);
+    if (it != voxelmap_manager->voxel_map_.end())
+    {
+      const VoxelOctoTree *leaf = it->second->find_correspond(ip.p_w);
+      if (leaf && leaf->plane_ptr_->is_plane_) ip.n_w = leaf->plane_ptr_->normal_;
+    }
+    gs_scan.push_back(ip);
+  }
+  vio_manager->processFrameGS(LidarMeasures.measures.back().img, gs_scan, LidarMeasures.last_lio_update_time - _first_lidar_time);
 
   if (imu_prop_enable) 
   {
@@ -592,6 +603,11 @@ void LIVMapper::run()
     stateEstimationAndMapping();
   }
   savePCD();
+  if (!gs_save_ply.empty() && vio_manager->gs_map)
+  {
+    const bool ok = vio_manager->gs_map->savePly(gs_save_ply);
+    printf("[ GS ] %s %lld Gaussians to %s\n", ok ? "saved" : "FAILED to save", vio_manager->gs_map->numGaussians(), gs_save_ply.c_str());
+  }
 }
 
 void LIVMapper::prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr)

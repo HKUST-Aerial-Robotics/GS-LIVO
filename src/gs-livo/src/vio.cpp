@@ -11,6 +11,9 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
+#ifdef WITH_GSVIZ
+#include "gslivo_bridge.hpp"  // gsviz viewer bridge (gsviz/slam/cpp), cmake -DGSVIZ_CPP_DIR=...
+#endif
 
 #include <c10/cuda/CUDACachingAllocator.h>
 
@@ -46,8 +49,9 @@ void VIOManager::initializeVIO()
 
 
 
-  gsmap_manager.reset(new GSMapManager(gs_octree, 3, 3)); // voxel_size 0.5m max_level 3
-  cout << GREEN << "root_voxel_size: " << root_voxel_size << " octree_max_level: " << octree_max_level << endl << RESET;
+  gs_map.reset(new gslivo::GSMap(gs_params));
+  cout << GREEN << "[ GS ] root voxel " << gs_params.root_voxel_size << " m, octree layers " << gs_params.max_layer
+       << ", sliding window " << gs_params.max_window << " Gaussians" << endl << RESET;
 
   fx = cam->fx();
   fy = cam->fy();
@@ -84,33 +88,7 @@ void VIOManager::initializeVIO()
   }
   length = grid_n_width * grid_n_height;
 
-   sub_GSMap.reserve(1000);
-
-
-    pointType= torch::TensorOptions().dtype(torch::kFloat32);
-
-    background=true ? torch::tensor({1.f, 1.f, 1.f}) : torch::tensor({0.f, 0.f, 0.f}, pointType).to(torch::kCUDA);
-    gs::param::ModelParameters modelParams = gs::param::ModelParameters();
-    modelParams.type=3;
-    modelParams.width=width;
-    modelParams.height=height;
-    modelParams.scale=image_resize_factor;
-
-    modelParams.channels=3;
-    modelParams.fx=fx;
-    modelParams.fy=fy;
-    modelParams.cx=cx;
-    modelParams.cy=cy;
-
-    // gaussians = std::make_unique<GaussianModel>(2);
-    scene = std::make_unique<Scene>(gaussians, modelParams);
-
-    gaussians.Training_setup(gs_params);
-    
-
-    img_rendered = cv::Mat::zeros(cam->height(), cam->width(), CV_8UC3);
-
-
+  img_rendered = cv::Mat::zeros(cam->height(), cam->width(), CV_8UC3);
 
   if(raycast_en)
   {
@@ -384,304 +362,6 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
   return numerator / sqrt(demoniator1 * demoniator2 + 1e-10);
 }
 
-
-Quaternions computeQuaternionFromNormals(const Eigen::Vector3f& normal, const Eigen::Vector3f& ref_vector = Eigen::Vector3f(1, 0, 0)) {
-    // if (normal.isZero(1e-6)) {
-    //     throw std::invalid_argument("Normal vector must not be zero.");
-    // }
-
-    // Normalize the input vectors
-    Eigen::Vector3f v1 = normal.normalized();
-    Eigen::Vector3f v2 = ref_vector.normalized();
-
-    // Check if the reference vector is almost parallel to the normal vector
-    if (std::fabs(v1.dot(v2)) > 0.999) {
-        // If almost parallel, choose a different reference vector
-        v2 = Eigen::Vector3f(0, 1, 0);  // Use Y axis as default
-        if (std::fabs(v1.dot(v2)) > 0.999) {
-            v2 = Eigen::Vector3f(0, 0, 1);  // Use Z axis if Y is also parallel
-        }
-    }
-
-    // Compute the quaternion using Eigen
-    Eigen::Quaternionf eigenQuat;
-    eigenQuat.setFromTwoVectors(v2, v1); 
-    Quaternions result;
-    result.qw = eigenQuat.w();
-    result.qx = eigenQuat.x();
-    result.qy = eigenQuat.y();
-    result.qz = eigenQuat.z();
-
-    return result;
-}
-
-
-
-void VIOManager::insertPointInto_GS_Map2(const std::vector<pointWithVar>& pg)
-{
-  for (const auto& pointVar : pg) 
-  {
-    V3D p_w(pointVar.point_w.x(), pointVar.point_w.y(), pointVar.point_w.z());
-    V3D p_b(pointVar.point_b.x(), pointVar.point_b.y(), pointVar.point_b.z());
-    V3D pf = new_frame_->w2f(p_w);
-    if (pf[2] < 0) continue;  // Ensure the point is in front of the camera
-    V2D pc = new_frame_->w2c(p_w);
-    if (!new_frame_->cam_->isInFrame(pc.cast<int>(), border_gs)) continue;  // Check if in image frame
-
-    Normal normal;
-
-    Eigen::Vector3d normalizedNormal = pointVar.normal;
-
-
-
-    normal.x = static_cast<float>(normalizedNormal.x());
-    normal.y = static_cast<float>(normalizedNormal.y());
-    normal.z = static_cast<float>(normalizedNormal.z());
-
-    float length = std::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
-    if (length <normal_rejecter) continue;
-
-
-    Quaternions quaternion = computeQuaternionFromNormals(pointVar.normal.cast<float>(), Eigen::Vector3f(1, 0, 0));
-
-    Point point;
-    point.x = static_cast<float>(p_w.x());
-    point.y = static_cast<float>(p_w.y());
-    point.z = static_cast<float>(p_w.z());
-
-    cv::Mat img_rgb = img_undistort; // Assuming this is how you access the image
-    V3F pixel = getInterpolatedPixel(img_rgb, pc);
-
-    Color color;
-    color.r = pixel[0];  // Assuming BGR format
-    color.g = pixel[1];
-    color.b = pixel[2];
-
-    Distance distance;
-    float dis=p_b.x()/(fx)*scale_factor;
-
-    distance.r1= static_cast<float>(0.01);
-
-    distance.r2 = static_cast<float>(scale_factor2);
-    distance.r3 = static_cast<float>(scale_factor2);
-
-
-
-    GS_point* gs_pt = new GS_point;
-
-    gs_pt->_points =point;
-    gs_pt->_colors = color;
-    gs_pt->_normals = normal;
-    gs_pt->_distance = distance;
-    gs_pt->_quaternion = quaternion;
-    gs_pt->_opacity = 1.0;
-    gs_total++;
-
-          gsmap_manager->UpdateGSMap(gs_pt);
-    
-    
-  }
-}
-
-
-void VIOManager::retrieveFrom_GS_Map2(vector<pointWithVar> &pg)
-{
-  
-   size_t keep_size ;
-   size_t delete_size ;
-
-    if(gsmap_manager->gs_map_.empty()) return;
-
-    if(sub_GSMap.size() > outlier_threshold3) {
-     
-    size_t keep_size =rand() % (int)(sub_GSMap.size() * 0.5);
-    delete_size=sub_GSMap.size()-keep_size;
-      // int pop_size = rand() % (int)(sub_GSMap.size() * 0.7);
-      vector<GS_point> temp_gs;
-      vector<GSVoxelOctree*> temp_octree;
-      
-      temp_gs.insert(temp_gs.end(), 
-          sub_GSMap.end() - keep_size, sub_GSMap.end());
-      temp_octree.insert(temp_octree.end(),
-          sub_octree_ptr_list.end() - keep_size, sub_octree_ptr_list.end());
-          
-      sub_GSMap.clear();
-      sub_octree_ptr_list.clear();
-      sub_GSMap = temp_gs;
-      sub_octree_ptr_list = temp_octree;
-    }
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-
-    vector<VOXEL_LOCATION> DeleteVoxelList;
-    vector<VOXEL_LOCATION> AddVoxelList;
-    DeleteVoxelList.clear();
-    AddVoxelList.clear();
-
-
-    for (int i = 0; i < pg.size(); i++)
-    {
-        float loc_xyz[3];
-        V3D pt_w = pg[i].point_w;
-        
-        float voxel_size = root_voxel_size;
-
-        for (int j = 0; j < 3; j++)
-        {
-            loc_xyz[j] = floor(pt_w[j] / voxel_size);
-        }
-        VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
-
-        auto corre_gs_voxel = gsmap_manager->gs_map_.find(position);
-        if (corre_gs_voxel == gsmap_manager->gs_map_.end()) continue;
-
-        auto iter = sub_gs_map.find(position);
-        if (iter == sub_gs_map.end()) 
-        { 
-            sub_gs_map[position] = 0; 
-            AddVoxelList.push_back(position);
-        }
-        else 
-        { 
-            iter->second = 0; 
-        }
-    }
-
-
-    for (size_t i = 0; i < AddVoxelList.size(); ++i) 
-    {
-        VOXEL_LOCATION position = AddVoxelList[i];
-        auto corre_gs_voxel = gsmap_manager->gs_map_.find(position);
-
-        if (corre_gs_voxel != gsmap_manager->gs_map_.end())
-        {
-            std::vector<GSVoxelOctree*> &leaf_node_list = corre_gs_voxel->second->leaf_node_list;
-            
-            for (int i = 0; i < leaf_node_list.size(); i++)
-            {
-                for(auto &pt: leaf_node_list[i]->gs_points_)
-                {
-                    if(pt->index != -1) continue;
-                    
-                    V3D p_w(pt->_points.x, pt->_points.y, pt->_points.z);
-                    V2D pc(new_frame_->w2c(p_w));
-                    if (!new_frame_->cam_->isInFrame(pc.cast<int>(), border_gs)) continue;
-                    
-                    pt->index = sub_GSMap.size();
-                    sub_GSMap.push_back(*pt);
-                    sub_octree_ptr_list.push_back(leaf_node_list[i]);
-                    
-                    assert(sub_GSMap.size() == sub_octree_ptr_list.size());
-                }
-            }
-
-            delete corre_gs_voxel->second;
-            gsmap_manager->gs_map_.erase(position);
-        }
-    }
-
-    if(sub_GSMap.size() > outlier_threshold2)
-    {
-
-        for (auto &iter : sub_gs_map)
-        {
-            VOXEL_LOCATION position = iter.first;
-
-            auto corre_gs_voxel = gsmap_manager->gs_map_.find(position);
-
-            if (corre_gs_voxel != gsmap_manager->gs_map_.end())
-            {
-
-                auto& leaf_node_list = corre_gs_voxel->second->leaf_node_list;
-
-                bool voxel_in_fov = true;  
-                for (int i = 0; i < leaf_node_list.size(); i++)
-                {
-                    for(auto &pt: leaf_node_list[i]->gs_points_)
-                    {
-                        V3D p_w(pt->_points.x, pt->_points.y, pt->_points.z);
-                        V2D pc(new_frame_->w2c(p_w));
-                        if (!new_frame_->cam_->isInFrame(pc.cast<int>(), border_gs)) 
-                        {
-                            voxel_in_fov = false;
-                            break;  
-                        }
-                    }
-                    if (!voxel_in_fov) break;  
-                }
-
-                if (!voxel_in_fov) DeleteVoxelList.push_back(position);
-                
-            }
-        }
-    }
-
-
-    size_t initial_size = sub_GSMap.size();
-
-    for (size_t delete_idx = 0; delete_idx < DeleteVoxelList.size(); ++delete_idx) 
-    {
-        VOXEL_LOCATION position = DeleteVoxelList[delete_idx];
-        auto corre_gs_voxel = gsmap_manager->gs_map_.find(position);
-        
-        if (corre_gs_voxel != gsmap_manager->gs_map_.end())
-        {
-            std::vector<GSVoxelOctree*> &leaf_node_list = corre_gs_voxel->second->leaf_node_list;
-            
-            for (int leaf_idx = 0; leaf_idx < leaf_node_list.size(); leaf_idx++)
-            {
-                for(auto &pt: leaf_node_list[leaf_idx]->gs_points_)
-                {
-                    if (pt->index == -1) continue;
-                    
-                    V3D p_w(pt->_points.x, pt->_points.y, pt->_points.z);
-                    V2D pc(new_frame_->w2c(p_w));
-                    if (new_frame_->cam_->isInFrame(pc.cast<int>(), border_gs)) continue;
-
-                    if(pt->index >= 0 && pt->index < sub_GSMap.size()) 
-                    {
-                        int lastIdx = sub_GSMap.size() - 1;
-                        if (pt->index != lastIdx) 
-                        {
-                            GSVoxelOctree* current_octree = sub_octree_ptr_list[pt->index];
-                            GSVoxelOctree* last_octree = sub_octree_ptr_list[lastIdx];
-                            
-
-                            std::swap(sub_GSMap[pt->index], sub_GSMap[lastIdx]);
-                            std::swap(sub_octree_ptr_list[pt->index], sub_octree_ptr_list[lastIdx]);
-                            
-                            for(auto &leaf : corre_gs_voxel->second->leaf_node_list) {
-                                for(auto &point : leaf->gs_points_) {
-                                    if(point->index == lastIdx) {
-                                        point->index = pt->index;
-                                    }
-                                    else if(point->index == pt->index) {
-                                        point->index = lastIdx;
-                                    }
-                                  pt->index = -1;
-                                  sub_GSMap.pop_back();
-                                  sub_octree_ptr_list.pop_back();
-                                }
-                            }
-                        }
-                        
-
-                        assert(sub_GSMap.size() == sub_octree_ptr_list.size());
-                    }
-                }         
-            }
-        }
-    }
-
-    for (auto &key : DeleteVoxelList)
-    {
-        sub_gs_map.erase(key);
-    }
-
-
-
-
-}
 
 void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
@@ -1135,15 +815,12 @@ void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
   updateFrameState(*state);
 }
 
-void VIOManager::computeJacobianAndUpdateEKF_GS(cv::Mat img,cv::Mat img_rendered)
+void VIOManager::computeJacobianAndUpdateEKF_GS(cv::Mat img)
 {
+  G.setZero();
   if (total_points == 0) return;
-
-
-  updateState_gs(img,img_rendered, 0);
-
+  for (int level = patch_pyrimid_level - 1; level >= 0; level--) updateStateGS(img, level);
   state->cov -= G * state->cov;
-
   updateFrameState(*state);
 }
 
@@ -2033,152 +1710,205 @@ void VIOManager::updateState(cv::Mat img, int level)
   // if (state->inv_expo_time < 0.0)  {ROS_ERROR("reset expo time!!!!!!!!!!\n"); state->inv_expo_time = 0.0;}
 }
 
-void VIOManager::updateState_gs(cv::Mat img, cv::Mat img_render, int level)
+gslivo::GSCamera VIOManager::gsCamera() const
 {
-if (total_points == 0) return;
-StatesGroup old_state = (*state);
-VectorXd z;
-MatrixXd H_sub;
-bool EKF_end = false;
-float last_error = std::numeric_limits<float>::max();
-const int H_DIM = total_points * patch_size_total;
-z.resize(H_DIM);
-z.setZero();
-H_sub.resize(H_DIM, 7);
-H_sub.setZero();
-for (int iteration = 0; iteration < max_iterations; iteration++)
+  gslivo::GSCamera c;
+  c.Rcw = Rcw;
+  c.Pcw = Pcw;
+  c.fx = fx, c.fy = fy, c.cx = cx, c.cy = cy;
+  c.width = width, c.height = height;
+  return c;
+}
+
+// Measurement points of the photometric update: per grid cell the LiDAR point (in the rendered map,
+// fully covered by Gaussians) with the strongest rendered gradient. Reference patches are cut from the
+// map rendered at the LIO pose, so no reference frame / affine warp is needed (Sec. II-D).
+void VIOManager::selectGSMeasurements(const cv::Mat &img_gray, const cv::Mat &render_gray, const cv::Mat &alpha,
+                                      const std::vector<gslivo::InitPoint> &scan)
 {
-double t1 = omp_get_wtime();
-M3D Rwi(state->rot_end);
-V3D Pwi(state->pos_end);
-Rcw = Rci * Rwi.transpose();
-Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
-Jdp_dt = Rci * Rwi.transpose();
-float error = 0.0;
-int n_meas = 0;
-// int max_threads = omp_get_max_threads();
-// int desired_threads = std::min(max_threads, total_points);
-// omp_set_num_threads(desired_threads);
+  gs_meas_pts.clear();
+  gs_ref_patch.clear();
+  total_points = 0;
+  const int margin = (patch_size_half + 2) * (1 << (patch_pyrimid_level - 1));
+  const int gw = (width + gs_meas_grid - 1) / gs_meas_grid, gh = (height + gs_meas_grid - 1) / gs_meas_grid;
+  std::vector<int> best_score(gw * gh, 8), best_idx(gw * gh, -1);  // 8: minimum gradient (grey levels)
+  for (size_t i = 0; i < scan.size(); i++)
+  {
+    const V3D pf = Rcw * scan[i].p_w + Pcw;
+    if (pf[2] < gs_params.min_depth || pf[2] > gs_params.max_depth) continue;
+    const double u = fx * pf[0] / pf[2] + cx, v = fy * pf[1] / pf[2] + cy;
+    if (u < margin || v < margin || u >= width - margin || v >= height - margin) continue;
+    const int ui = static_cast<int>(u), vi = static_cast<int>(v);
+    if (alpha.at<float>(vi, ui) < gs_min_alpha) continue;
+    const int score = std::abs(render_gray.at<uint8_t>(vi, ui + 1) - render_gray.at<uint8_t>(vi, ui - 1)) +
+                      std::abs(render_gray.at<uint8_t>(vi + 1, ui) - render_gray.at<uint8_t>(vi - 1, ui));
+    const int cell = (vi / gs_meas_grid) * gw + ui / gs_meas_grid;
+    if (score > best_score[cell])
+    {
+      best_score[cell] = score;
+      best_idx[cell] = static_cast<int>(i);
+    }
+  }
+  std::vector<float> ref(warp_len), cur(warp_len);
+  for (int cell = 0; cell < gw * gh; cell++)
+  {
+    if (best_idx[cell] < 0) continue;
+    const V3D &p = scan[best_idx[cell]].p_w;
+    const V3D pf = Rcw * p + Pcw;
+    const V2D pc(fx * pf[0] / pf[2] + cx, fy * pf[1] / pf[2] + cy);
+    for (int level = 0; level < patch_pyrimid_level; level++) getImagePatch(render_gray, pc, ref.data(), level);
+    getImagePatch(img_gray, pc, cur.data(), 0);
+    double err = 0;
+    for (int k = 0; k < patch_size_total; k++) err += (cur[k] - ref[k]) * (cur[k] - ref[k]);
+    if (err > outlier_threshold * patch_size_total) continue;
+    gs_meas_pts.push_back(p);
+    gs_ref_patch.insert(gs_ref_patch.end(), ref.begin(), ref.end());
+  }
+  total_points = static_cast<int>(gs_meas_pts.size());
+}
+
+// IESKF update with the photometric residual I_k(pi(T p)) - I^_k(p) (Eq. 10), the rendered image as
+// reference; Jacobians through the projection of the point (Eq. 11-12, 15-17) as in FAST-LIVO2.
+// H^T H and H^T z are accumulated per thread instead of stacking H (same result, less memory traffic).
+void VIOManager::updateStateGS(cv::Mat img, int level)
+{
+  if (total_points == 0) return;
+  StatesGroup old_state = (*state);
+  bool EKF_end = false;
+  float last_error = std::numeric_limits<float>::max();
+  const int scale = (1 << level);
+  const float inv_scale = 1.0f / scale;
+  const int margin = (patch_size_half + 2) * scale;
+  const double inv_ref_expo = 1.0;  // the map is rendered in the photometric scale it was trained on
+
+  for (int iteration = 0; iteration < max_iterations; iteration++)
+  {
+    double t1 = omp_get_wtime();
+
+    M3D Rwi(state->rot_end);
+    V3D Pwi(state->pos_end);
+    Rcw = Rci * Rwi.transpose();
+    Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
+    Jdp_dt = Rci * Rwi.transpose();
+
+    MD(7, 7) HTH = MD(7, 7)::Zero();
+    MD(7, 1) HTz = MD(7, 1)::Zero();
+    double error = 0.0;
+    int n_meas = 0;
 #ifdef MP_EN
-omp_set_num_threads(MP_PROC_NUM);
-#pragma omp parallel for reduction(+:error, n_meas)
+    omp_set_num_threads(MP_PROC_NUM);
+#pragma omp parallel
 #endif
-for (int i = 0; i < total_points; i++)
-{
-// printf("thread is %d, i=%d, i address is %p\n", omp_get_thread_num(), i, &i);
-MD(1, 2) Jimg;
-MD(2, 3) Jdpi;
-MD(1, 3) Jdphi, Jdp, JdR, Jdt;
-float patch_error = 0.0;
-int search_level = visual_submap->search_levels[i];
-int pyramid_level = level + search_level;
-int scale = (1 << pyramid_level);
-float inv_scale = 1.0f / scale;
-VisualPoint *pt = visual_submap->voxel_points[i];
-if (pt == nullptr) continue;
-V3D pf = Rcw * pt->pos_ + Pcw;
-V2D pc = cam->world2cam(pf);
-computeProjectionJacobian(pf, Jdpi);
-M3D p_hat;
-p_hat << SKEW_SYM_MATRX(pf);
-float u_ref = pc[0];
-float v_ref = pc[1];
-int u_ref_i = floorf(pc[0] / scale) * scale;
-int v_ref_i = floorf(pc[1] / scale) * scale;
-float subpix_u_ref = (u_ref - u_ref_i) / scale;
-float subpix_v_ref = (v_ref - v_ref_i) / scale;
-float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
-float w_ref_tr = subpix_u_ref * (1.0 - subpix_v_ref);
-float w_ref_bl = (1.0 - subpix_u_ref) * subpix_v_ref;
-float w_ref_br = subpix_u_ref * subpix_v_ref;
-double inv_ref_expo = 1.0;  // Assume fixed, as rendering handles exposure or consistent
-// ROS_ERROR("inv_ref_expo: %.3lf, state->inv_expo_time: %.3lf\n", inv_ref_expo, state->inv_expo_time);
-for (int x = 0; x < patch_size; x++)
-{
-uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * width + u_ref_i - patch_size_half * scale;
-uint8_t *render_ptr = (uint8_t *)img_render.data + (v_ref_i + x * scale - patch_size_half * scale) * width + u_ref_i - patch_size_half * scale;
-for (int y = 0; y < patch_size; ++y, img_ptr += scale, render_ptr += scale)
-{
-float du =
-0.5f *
-((w_ref_tl * img_ptr[scale] + w_ref_tr * img_ptr[scale * 2] + w_ref_bl * img_ptr[scale * width + scale] +
-w_ref_br * img_ptr[scale * width + scale * 2]) -
-(w_ref_tl * img_ptr[-scale] + w_ref_tr * img_ptr[0] + w_ref_bl * img_ptr[scale * width - scale] + w_ref_br * img_ptr[scale * width]));
-float dv =
-0.5f *
-((w_ref_tl * img_ptr[scale * width] + w_ref_tr * img_ptr[scale + scale * width] + w_ref_bl * img_ptr[width * scale * 2] +
-w_ref_br * img_ptr[width * scale * 2 + scale]) -
-(w_ref_tl * img_ptr[-scale * width] + w_ref_tr * img_ptr[-scale * width + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
-float du2 =
-0.5f *
-((w_ref_tl * render_ptr[scale] + w_ref_tr * render_ptr[scale * 2] + w_ref_bl * render_ptr[scale * width + scale] +
-w_ref_br * render_ptr[scale * width + scale * 2]) -
-(w_ref_tl * render_ptr[-scale] + w_ref_tr * render_ptr[0] + w_ref_bl * render_ptr[scale * width - scale] + w_ref_br * render_ptr[scale * width]));
-float dv2 =
-0.5f *
-((w_ref_tl * render_ptr[scale * width] + w_ref_tr * render_ptr[scale + scale * width] + w_ref_bl * render_ptr[width * scale * 2] +
-w_ref_br * render_ptr[width * scale * 2 + scale]) -
-(w_ref_tl * render_ptr[-scale * width] + w_ref_tr * render_ptr[-scale * width + scale] + w_ref_bl * render_ptr[0] + w_ref_br * render_ptr[scale]));
-Jimg << state->inv_expo_time * du - inv_ref_expo * du2, state->inv_expo_time * dv - inv_ref_expo * dv2;
-Jimg = Jimg * inv_scale;
-Jdphi = Jimg * Jdpi * p_hat;
-Jdp = -Jimg * Jdpi;
-JdR = Jdphi * Jdphi_dR + Jdp * Jdp_dR;
-Jdt = Jdp * Jdp_dt;
-double cur_value =
-w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] + w_ref_br * img_ptr[scale * width + scale];
-double ref_value =
-w_ref_tl * render_ptr[0] + w_ref_tr * render_ptr[scale] + w_ref_bl * render_ptr[scale * width] + w_ref_br * render_ptr[scale * width + scale];
-if (ref_value == 0.0) continue;  // No rendering, skip
-double res = state->inv_expo_time * cur_value - inv_ref_expo * ref_value;
-z(i * patch_size_total + x * patch_size + y) = res;
-patch_error += res * res;
-n_meas += 1;
-if (exposure_estimate_en) { H_sub.block<1, 7>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt, cur_value; }
-else { H_sub.block<1, 6>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt; }
-}
-}
-visual_submap->errors[i] = patch_error;
-error += patch_error;
-}
-error = error / n_meas;
-compute_jacobian_time += omp_get_wtime() - t1;
-// printf("\nPYRAMID LEVEL %i\n---------------\n", level);
-// std::cout << "It. " << iteration
-// << "\t last_error = " << last_error
-// << "\t new_error = " << error
-// << std::endl;
-double t3 = omp_get_wtime();
-if (error <= last_error)
-{
-old_state = (*state);
-last_error = error;
-auto &&H_sub_T = H_sub.transpose();
-H_T_H.setZero();
-G.setZero();
-H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
-MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
-auto &&HTz = H_sub_T * z;
-auto vec = (*state_propagat) - (*state);
-G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
-MD(DIM_STATE, 1)
-solution = -K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0);
-(*state) += solution;
-auto &&rot_add = solution.block<3, 1>(0, 0);
-auto &&t_add = solution.block<3, 1>(3, 0);
-auto &&expo_add = solution.block<1, 1>(6, 0);
-// if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f) && (expo_add.norm() < 0.001f)) EKF_end = true;
-if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f)) EKF_end = true;
-}
-else
-{
-(*state) = old_state;
-EKF_end = true;
-}
-update_ekf_time += omp_get_wtime() - t3;
-if (iteration == max_iterations || EKF_end) break;
-}
-// if (state->inv_expo_time < 0.0) {ROS_ERROR("reset expo time!!!!!!!!!!\n"); state->inv_expo_time = 0.0;}
+    {
+      MD(7, 7) HTH_t = MD(7, 7)::Zero();
+      MD(7, 1) HTz_t = MD(7, 1)::Zero();
+      double error_t = 0.0;
+      int n_meas_t = 0;
+#ifdef MP_EN
+#pragma omp for nowait
+#endif
+      for (int i = 0; i < total_points; i++)
+      {
+        const V3D pf = Rcw * gs_meas_pts[i] + Pcw;
+        if (pf[2] < 0.1) continue;
+        const V2D pc(fx * pf[0] / pf[2] + cx, fy * pf[1] / pf[2] + cy);  // undistorted image: pinhole
+        if (pc[0] < margin || pc[1] < margin || pc[0] >= width - margin || pc[1] >= height - margin) continue;
+
+        MD(2, 3) Jdpi;
+        computeProjectionJacobian(pf, Jdpi);
+        M3D p_hat;
+        p_hat << SKEW_SYM_MATRX(pf);
+        // pixel-independent part of d(pixel)/d(rotation, translation of the IMU pose)
+        const MD(2, 3) A_R = Jdpi * p_hat * Jdphi_dR - Jdpi * Jdp_dR;
+        const MD(2, 3) A_t = -Jdpi * Jdp_dt;
+
+        const float u_ref = pc[0];
+        const float v_ref = pc[1];
+        const int u_ref_i = floorf(pc[0] / scale) * scale;
+        const int v_ref_i = floorf(pc[1] / scale) * scale;
+        const float subpix_u_ref = (u_ref - u_ref_i) / scale;
+        const float subpix_v_ref = (v_ref - v_ref_i) / scale;
+        const float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
+        const float w_ref_tr = subpix_u_ref * (1.0 - subpix_v_ref);
+        const float w_ref_bl = (1.0 - subpix_u_ref) * subpix_v_ref;
+        const float w_ref_br = subpix_u_ref * subpix_v_ref;
+        const float *P = &gs_ref_patch[static_cast<size_t>(i) * warp_len + patch_size_total * level];
+
+        for (int x = 0; x < patch_size; x++)
+        {
+          uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * width + u_ref_i - patch_size_half * scale;
+          for (int y = 0; y < patch_size; ++y, img_ptr += scale)
+          {
+            float du =
+                0.5f *
+                ((w_ref_tl * img_ptr[scale] + w_ref_tr * img_ptr[scale * 2] + w_ref_bl * img_ptr[scale * width + scale] +
+                  w_ref_br * img_ptr[scale * width + scale * 2]) -
+                 (w_ref_tl * img_ptr[-scale] + w_ref_tr * img_ptr[0] + w_ref_bl * img_ptr[scale * width - scale] + w_ref_br * img_ptr[scale * width]));
+            float dv =
+                0.5f *
+                ((w_ref_tl * img_ptr[scale * width] + w_ref_tr * img_ptr[scale + scale * width] + w_ref_bl * img_ptr[width * scale * 2] +
+                  w_ref_br * img_ptr[width * scale * 2 + scale]) -
+                 (w_ref_tl * img_ptr[-scale * width] + w_ref_tr * img_ptr[-scale * width + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
+
+            MD(1, 2) Jimg;
+            Jimg << du, dv;
+            Jimg *= state->inv_expo_time * inv_scale;
+            const double cur_value =
+                w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] + w_ref_br * img_ptr[scale * width + scale];
+            const double res = state->inv_expo_time * cur_value - inv_ref_expo * P[x * patch_size + y];
+
+            MD(1, 7) h;
+            h << Jimg * A_R, Jimg * A_t, exposure_estimate_en ? cur_value : 0.0;
+            HTH_t.noalias() += h.transpose() * h;
+            HTz_t.noalias() += h.transpose() * res;
+            error_t += res * res;
+            n_meas_t++;
+          }
+        }
+      }
+#ifdef MP_EN
+#pragma omp critical
+#endif
+      {
+        HTH += HTH_t;
+        HTz += HTz_t;
+        error += error_t;
+        n_meas += n_meas_t;
+      }
+    }
+    if (n_meas == 0) break;
+    error /= n_meas;
+    compute_jacobian_time += omp_get_wtime() - t1;
+
+    double t3 = omp_get_wtime();
+    if (error <= last_error)
+    {
+      old_state = (*state);
+      last_error = error;
+
+      H_T_H.setZero();
+      G.setZero();
+      H_T_H.block<7, 7>(0, 0) = HTH;
+      MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      auto vec = (*state_propagat) - (*state);
+      G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
+      MD(DIM_STATE, 1)
+      solution = -K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0);
+
+      (*state) += solution;
+      auto &&rot_add = solution.block<3, 1>(0, 0);
+      auto &&t_add = solution.block<3, 1>(3, 0);
+      if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f)) EKF_end = true;
+    }
+    else
+    {
+      (*state) = old_state;
+      EKF_end = true;
+    }
+    update_ekf_time += omp_get_wtime() - t3;
+
+    if (iteration == max_iterations || EKF_end) break;
+  }
 }
 
 void VIOManager::updateFrameState(StatesGroup state)
@@ -2252,40 +1982,6 @@ V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
   V3F pixel(B, G, R);
   return pixel;
 }
-
-
-
-cv::Mat VIOManager::tensor_to_mat4(torch::Tensor tensor) {
-    // Convert from float [0, 1] to uint8 [0, 255]
-
-    if (tensor.device().type() != torch::kCPU) {
-        tensor = tensor.to(torch::kCPU);  // Move local copy to CPU
-    }
-    tensor = tensor.mul(255).clamp(0, 255).to(torch::kU8);
-
-    // Permute dimensions back from [channels, height, width] to [height, width, channels]
-    tensor = tensor.permute({1, 2, 0}).contiguous();
-
-    // Get the height, width, and channels
-    int height = tensor.size(0);
-    int width = tensor.size(1);
-    int channels = tensor.size(2);
-      // Debug output
-    // std::cout << "Tensor dimensions - Height: " << height << ", Width: " << width << ", Channels: " << channels << std::endl;
-
-
-    if (channels != 3) {
-        throw std::runtime_error("Expected 3 channels for RGB image");
-    }
-
-    // Create a cv::Mat from the tensor
-    cv::Mat mat(height, width, CV_8UC3, tensor.data_ptr());
-
-    return mat.clone(); // Clone to ensure data ownership
-}
-
-
-
 
 
 
@@ -2406,76 +2102,123 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // cv::imwrite("/home/chunran/Desktop/raycasting/" + std::to_string(new_frame_->id_) + ".png", img_cp);
 }
 
-void VIOManager::processFrameGS(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
+void VIOManager::processFrameGS(cv::Mat &img, const std::vector<gslivo::InitPoint> &scan, double img_time)
 {
   if (width != img.cols || height != img.rows)
   {
     if (img.empty()) printf("[ VIO ] Empty Image!\n");
     cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
   }
-  img_rgb = img.clone();
-  img_cp = img.clone();
-  // img_test = img.clone();
-
-  if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
-
-// sheng 去畸变
-  vk::PinholeCamera* pinhole_cam = dynamic_cast<vk::PinholeCamera*>(cam);
-  pinhole_cam->undistortImage(img_rgb, img_undistort);
-  img_undistort=img_undistort.clone();
-
-  new_frame_.reset(new Frame(cam, img));
-  updateFrameState(*state);
-  
-  resetGrid();
+  img_rgb = img.clone();  // distorted BGR: LIVMapper colours the published cloud with new_frame_'s projection
+  // The Gaussian map lives in the undistorted (pinhole) image.
+  pinhole_cam = dynamic_cast<vk::PinholeCamera *>(cam);
+  pinhole_cam->undistortImage(img, img_undistort);
+  cv::Mat rgb, gray, gray_raw;
+  cv::cvtColor(img_undistort, rgb, cv::COLOR_BGR2RGB);
+  cv::cvtColor(img_undistort, gray, cv::COLOR_BGR2GRAY);
+  cv::cvtColor(img, gray_raw, cv::COLOR_BGR2GRAY);
+  new_frame_.reset(new Frame(cam, gray_raw));
+  updateFrameState(*state);  // camera pose from the LIO update
 
   double t1 = omp_get_wtime();
+  // Sec. II-B.1 / II-C: new Gaussians from the LiDAR scan, sliding window to the current FoV
+  gs_map->updateWindow(scan, rgb, gsCamera(), frame_count);
+  double t2 = omp_get_wtime();
 
-  retrieveFrom_GS_Map2(pg);
-
-
-  if(sub_GSMap.size()>0)
+  // Sec. II-D: IESKF photometric update against the map rendered at the LIO pose (Eq. 10)
+  const V3D pos_lio = state->pos_end;
+  const M3D rot_lio = state->rot_end;
+  total_points = 0;
+  compute_jacobian_time = update_ekf_time = 0.0;
+  const bool log_frame = gs_render_every > 0 && frame_count % gs_render_every == 0;
+  if (gs_map->windowSize() > 0 && (gs_visual_update_en || log_frame))
   {
-
-    gaussians.Create_from_our_format(sub_GSMap);
-    gaussians.Training_setup(gs_params);
-    scene->_scene_infos->_cameras[0]._img_data= img_undistort.data;
-    scene->UpdateFirstCameraImage();
-    scene->UpdateFirstCameraPose(Rcw.transpose().cast<float>(), (Pcw).cast<float>());
-    auto& cam = (*scene).Get_training_camera(0);
-    for(int i=0;i<gs_params.iterations;i++)
+    const double ts = omp_get_wtime();
+    torch::Tensor alpha;
+    const torch::Tensor render = gs_map->render(gsCamera(), &alpha);
+    if (log_frame)  // how well the map (before seeing this image) predicts it: novel-view PSNR
     {
-      
-      auto [image, viewspace_point_tensor, visibility_filter, radii] = render(cam,  gaussians, background);
-      auto gt_image = cam.Get_original_image().to(torch::kCUDA, true);
-      auto l1l = gaussian_splatting::l1_loss(image, gt_image).to(torch::kCUDA, true);
-      torch::Tensor loss = l1l;
-
-      loss.backward();
-      auto visible_max_radii = gaussians._max_radii2D.masked_select(visibility_filter);
-      auto visible_radii = radii.masked_select(visibility_filter);
-      auto max_radii = torch::max(visible_max_radii, visible_radii);
-      gaussians._max_radii2D.masked_scatter_(visibility_filter, max_radii);
-      gaussians._optimizer->step();
-      gaussians._optimizer->zero_grad(true);
-      if(i==(gs_params.iterations-1))
+      const torch::Tensor m = (alpha > 0.5f).to(torch::kFloat32);
+      const float n = m.sum().item<float>();
+      if (n > 0)
       {
-        cv::Mat image_mat = tensor_to_mat4(image);
-        img_rendered=image_mat.clone();
-        auto gt_image = cam.Get_original_image().to(torch::kCUDA, true);
-        if (std::getenv("DISPLAY"))  // headless machines have no display
-        {
-          cv::imshow("Rendered Image", img_rendered);
-          cv::imshow("img_undistort k", img_undistort);
-          cv::waitKey(1);
-        }
+        const float mse = ((render.clamp(0, 1) - gslivo::imageToTensor(rgb)).pow(2) * m).sum().item<float>() / (3.f * n);
+        gs_psnr_pred = -10.0 * std::log10(std::max(mse, 1e-10f));
       }
     }
+    if (gs_visual_update_en)
+    {
+      cv::Mat render_gray;
+      cv::cvtColor(gslivo::tensorToImage(render), render_gray, cv::COLOR_RGB2GRAY);
+      torch::Tensor alpha_cpu = alpha.contiguous().cpu();
+      const cv::Mat alpha_mat(height, width, CV_32F, alpha_cpu.data_ptr<float>());
+      selectGSMeasurements(gray, render_gray, alpha_mat, scan);
+      gs_select_time = omp_get_wtime() - ts;
+      computeJacobianAndUpdateEKF_GS(gray);
+    }
   }
+  const double vis_dt_cm = (state->pos_end - pos_lio).norm() * 100.0;
+  const double vis_dr_deg = Eigen::AngleAxisd(rot_lio.transpose() * state->rot_end).angle() * 57.3;
+  double t3 = omp_get_wtime();
 
+  // Sec. II-B.2: optimize the window at the updated pose (Eq. 9)
+  gs_map->optimize(rgb, gsCamera(), gs_params.iterations);
+  double t4 = omp_get_wtime();
 
+  if (gs_render_every > 0 && frame_count % gs_render_every == 0)
+  {
+    torch::NoGradGuard ng;
+    torch::Tensor alpha;
+    torch::Tensor r = gs_map->render(gsCamera(), &alpha);
+    cv::cvtColor(gslivo::tensorToImage(r), img_rendered, cv::COLOR_RGB2BGR);
+    const torch::Tensor m = (alpha > 0.5f).to(torch::kFloat32);
+    const torch::Tensor se = (r.clamp(0, 1) - gslivo::imageToTensor(rgb)).pow(2);
+    const float n = m.sum().item<float>();
+    gs_coverage = n / (width * height);
+    if (n > 0)
+    {
+      const float mse = (se * m).sum().item<float>() / (3.f * n);
+      gs_psnr = -10.0 * std::log10(std::max(mse, 1e-10f));
+    }
+    gs_psnr_full = -10.0 * std::log10(std::max(se.mean().item<float>(), 1e-10f));
+    if (std::getenv("DISPLAY"))
+    {
+      cv::imshow("GS-LIVO render", img_rendered);
+      cv::waitKey(1);
+    }
+  }
+  frame_count++;
 
-  computeJacobianAndUpdateEKF_GS(img,img_rendered);
-
-  insertPointInto_GS_Map2(pg);
+  const double t_total = t4 - t1;
+  ave_gs_time = ave_gs_time * (frame_count - 1) / frame_count + t_total / frame_count;
+  const gslivo::GSFrameStats &s = gs_map->stats;
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;34m|                    GS-LIVO Gaussian map                     |\033[0m\n");
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;32m| %-29s | %-27s |\033[0m\n", "map Gaussians / voxels", (std::to_string(s.map_gaussians) + " / " + std::to_string(s.map_voxels)).c_str());
+  printf("\033[1;32m| %-29s | %-27s |\033[0m\n", "window Gaussians / voxels", (std::to_string(s.window_gaussians) + " / " + std::to_string(s.window_voxels)).c_str());
+  printf("\033[1;32m| %-29s | %-27s |\033[0m\n", "new / +vox / -vox(fov) / -vox(lru)",
+         (std::to_string(s.new_gaussians) + " / " + std::to_string(s.add_voxels) + " / " + std::to_string(s.delete_voxels) + " / " +
+          std::to_string(s.evict_voxels)).c_str());
+  printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "window maintenance (ms)", (t2 - t1) * 1000);
+  printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "photometric update (ms)", (t3 - t2) * 1000);
+  printf("\033[1;32m| %-29s | %-27s |\033[0m\n", "  points / dt cm / dr deg", (std::to_string(total_points) + " / " + std::to_string(vis_dt_cm).substr(0, 5) + " / " + std::to_string(vis_dr_deg).substr(0, 5)).c_str());
+  printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "  render+select (ms)", gs_select_time * 1000);
+  printf("\033[1;32m| %-29s | %-27s |\033[0m\n", "  jacobian / ekf (ms)",
+         (std::to_string(compute_jacobian_time * 1000).substr(0, 6) + " / " + std::to_string(update_ekf_time * 1000).substr(0, 6)).c_str());
+  printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "optimization (ms)", (t4 - t3) * 1000);
+  printf("\033[1;32m| %-29s | %-27.4f |\033[0m\n", "  L1 loss", s.loss);
+  printf("\033[1;32m| %-29s | %-27.2f |\033[0m\n", "  PSNR before optim. (dB)", gs_psnr_pred);
+  printf("\033[1;32m| %-29s | %-27.2f |\033[0m\n", "  PSNR (covered pixels, dB)", gs_psnr);
+  printf("\033[1;32m| %-29s | %-27.2f |\033[0m\n", "  PSNR (full image, dB)", gs_psnr_full);
+  printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "  coverage", gs_coverage);
+  printf("\033[1;34m| %-29s | %-27.3f |\033[0m\n", "GS total / average (ms)", t_total * 1000);
+  printf("\033[1;34m| %-29s | %-27.3f |\033[0m\n", "", ave_gs_time * 1000);
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+#ifdef WITH_GSVIZ
+  {
+    static gsviz::GsLivoBridge *gsviz_bridge = std::getenv("GSVIZ_DISABLE") ? nullptr : new gsviz::GsLivoBridge(this);
+    if (gsviz_bridge) gsviz_bridge->onFrame(img_time);
+  }
+#endif
 }

@@ -4,6 +4,8 @@
 	<arg name="rviz" default="true" />
 
 	<rosparam command="load" file="$(find fast_livo)/config/avia.yaml" />
+	<arg name="save_ply" default="" />  <!-- write the Gaussian map (3DGS PLY) on shutdown -->
+	<param name="gs/save_ply" value="$(arg save_ply)" />
 
 	<node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
 		<rosparam file="$(find fast_livo)/config/camera_pinhole.yaml" />

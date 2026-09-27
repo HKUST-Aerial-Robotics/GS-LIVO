@@ -14,8 +14,7 @@ which is included as part of this source code package.
 #define VIO_H_
 
 #include "voxel_map.h"
-
-#include "GSVoxelOctree.h"
+#include "gs_map.h"
 
 #include "feature.h"
 #include <opencv2/imgproc/imgproc_c.h>
@@ -25,30 +24,6 @@ which is included as part of this source code package.
 #include <vikit/robust_cost.h>
 #include <vikit/vision.h>
 #include <vikit/pinhole_camera.h>
-
-
-// sheng 3dgs 头文件
-#include <torch/torch.h>
-
-#include "debug_utils.cuh"
-#include "gaussian.cuh"
-#include "loss_monitor.cuh"
-#include "loss_utils.cuh"
-#include "parameters.cuh"
-#include "render_utils.cuh"
-#include "scene.cuh"
-// sheng 3dgs 头文件
-
-
-class VOXEL_GS_POINTS
-{
-public:
-  std::vector<GS_point*> voxel_gs_points;
-  int count;
-  VOXEL_GS_POINTS(int num) : count(num) {}
-};
-
-
 
 
 struct SubSparseMap
@@ -111,39 +86,19 @@ public:
 class VIOManager
 {
 public:
+  // Gaussian map (Sec. II-A..C) and the photometric update against its rendering (Sec. II-D)
+  gslivo::GSMapParams gs_params;
+  std::unique_ptr<gslivo::GSMap> gs_map;
+  bool gs_visual_update_en = true;
+  int gs_meas_grid = 16;  // one measurement point per gs_meas_grid x gs_meas_grid pixels
+  double gs_min_alpha = 0.95;  // rendered opacity required at a measurement point
+  int gs_render_every = 5;  // refresh img_rendered / the PSNR log every n frames
+  std::vector<V3D> gs_meas_pts;  // measurement points (world)
+  std::vector<float> gs_ref_patch;  // their patches in the rendered image, warp_len floats each
+  double gs_psnr = -1, gs_psnr_full = -1, gs_psnr_pred = -1, gs_coverage = 0, ave_gs_time = 0, gs_select_time = 0;
 
-
-
-
-  unordered_map<VOXEL_LOCATION, int> sub_gs_map;
-  deque<vector<pointWithVar> > buffer_pg;
-  unordered_map<VOXEL_LOCATION, VOXEL_GS_POINTS *> gs_map;
-  std::vector<GS_point > sub_GSMap;
-
-
-
-  torch::TensorOptions pointType ;
-  const int window_size = 11;
-  const int channel = 3;
-  torch::Tensor conv_window = gaussian_splatting::create_window(11, 3).to(torch::kFloat32).to(torch::kCUDA, true);
-  torch::Tensor background ;
-
-  gs::param::ModelParameters modelParams; // 在类中声明 modelParams
-  gs::param::OptimizationParameters gs_params;
-  int plot_gs_render;
-  int border_gs;
-  GaussianModel gaussians;
-  std::unique_ptr<Scene> scene;
-
-  std::unordered_map<VOXEL_LOCATION, GSVoxelOctree*> gs_octree;
-  GSMapManagerPtr gsmap_manager;
-  std::vector<GSVoxelOctree*> sub_octree_ptr_list;
-
-
-
-
-  cv::Mat img_undistort;
-  cv::Mat img_rendered;
+  cv::Mat img_undistort;  // BGR, undistorted
+  cv::Mat img_rendered;  // BGR, the window rendered at the latest pose
 
   int grid_size;
   vk::AbstractCamera *cam;
@@ -153,13 +108,6 @@ public:
   M3D Rli, Rci, Rcl, Rcw, Jdphi_dR, Jdp_dt, Jdp_dR;
   V3D Pli, Pci, Pcl, Pcw;
 
-  double scale_factor,scale_factor2,normal_rejecter;
-  int save_GS_iter;
-  double root_voxel_size;
-  int octree_max_level;
-
-
-  int64 gs_total=0;
   std::ofstream performance_file;
 
   vector<int> grid_num;
@@ -214,14 +162,13 @@ public:
   ~VIOManager();
   void updateStateInverse(cv::Mat img, int level);
   void updateState(cv::Mat img, int level);
-  void updateState_gs(cv::Mat img, cv::Mat img_render, int level);
+  void updateStateGS(cv::Mat img, int level);
   void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
-  void processFrameGS(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
+  void processFrameGS(cv::Mat &img, const std::vector<gslivo::InitPoint> &scan, double img_time);
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
-  void retrieveFrom_GS_Map2(vector<pointWithVar> &pg);
-  
-  void insertPointInto_GS_Map2(const std::vector<pointWithVar>& pg);
-  cv::Mat tensor_to_mat4(torch::Tensor tensor);
+  gslivo::GSCamera gsCamera() const;
+  void selectGSMeasurements(const cv::Mat &img_gray, const cv::Mat &render_gray, const cv::Mat &alpha,
+                            const std::vector<gslivo::InitPoint> &scan);
   void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
   void setImuToLidarExtrinsic(const V3D &transl, const M3D &rot);
   void setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P);
@@ -229,7 +176,7 @@ public:
   void getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(V3D p, MD(2, 3) & J);
   void computeJacobianAndUpdateEKF(cv::Mat img);
-  void computeJacobianAndUpdateEKF_GS(cv::Mat img,cv::Mat img_rendered);
+  void computeJacobianAndUpdateEKF_GS(cv::Mat img);
   void resetGrid();
 
   void updateVisualMapPoints(cv::Mat img);
