@@ -2463,10 +2463,12 @@ void VIOManager::processFrameGS(cv::Mat &img, vector<pointWithVar> &pg, const un
         cv::Mat image_mat = tensor_to_mat4(image);
         img_rendered=image_mat.clone();
         auto gt_image = cam.Get_original_image().to(torch::kCUDA, true);
-        cv::imshow("Rendered Image", img_rendered);
-        cv::imshow("img_undistort k", img_undistort);
-
-        cv::waitKey(1); 
+        if (std::getenv("DISPLAY"))  // headless machines have no display
+        {
+          cv::imshow("Rendered Image", img_rendered);
+          cv::imshow("img_undistort k", img_undistort);
+          cv::waitKey(1);
+        }
       }
     }
   }

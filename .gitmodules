@@ -1,0 +1,3 @@
+[submodule "src/rpg_vikit"]
+	path = src/rpg_vikit
+	url = https://github.com/xuankuzcr/rpg_vikit.git

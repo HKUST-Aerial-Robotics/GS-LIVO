@@ -11,7 +11,7 @@ get_filename_component(PROJ_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
 # Define the absolute path to libtorch
 
 
-set(SIMPLE_KNN_DIR "/usr/local") 
+set(SIMPLE_KNN_DIR "/usr/local" CACHE PATH "simple-knn install prefix")
 include_directories(${SIMPLE_KNN_DIR}/include/simple-knn/)
 link_directories(${SIMPLE_KNN_DIR}/lib)
 
@@ -122,7 +122,7 @@ find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
 
-set(LIBTORCH_DIR "./libtorch")
+set(LIBTORCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libtorch" CACHE PATH "LibTorch root")
 include_directories(${LIBTORCH_DIR}/include)
 link_directories(${LIBTORCH_DIR}/lib)
 
@@ -157,7 +157,7 @@ target_link_libraries(3dgs_lib
         nlohmann_json::nlohmann_json
         glm::glm
         Threads::Threads
-        yaml-cpp
+        yaml-cpp::yaml-cpp
 )
 
 

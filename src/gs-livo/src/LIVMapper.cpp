@@ -119,6 +119,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("scale_factor2", scale_factor2, 3.4);
   nh.param<double>("root_voxel_size", root_voxel_size, 0.5);
   nh.param<int>("octree_max_level", octree_max_level, 3);
+  nh.param<double>("normal_rejecter", normal_rejecter, 0.1);  // was left uninitialized
+  nh.param<int>("save_GS_iter", save_GS_iter, -1);  // was left uninitialized
 
   nh.param<int>("gs/gs_iterations", gs_iterations, 4);
   nh.param<int>("gs/border_gs",  border_gs, 4);
