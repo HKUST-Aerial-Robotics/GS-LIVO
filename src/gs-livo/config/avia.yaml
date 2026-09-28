@@ -118,3 +118,13 @@ gs:
   min_alpha: 0.95
   render_every: 5           # refresh the rendered image / PSNR log every n frames
   save_ply: ""              # write the whole map as a 3DGS PLY on shutdown
+  # Depth completion for initialization (Gaussian-LIC2 style: SPNet + TensorRT), docs/depth_completion.md
+  dc_en: false              # launch: depth_completion:=true dc_engine:=/path/spnet_512_640.engine
+  dc_engine: ""             # TensorRT engine built for this image size (640x512)
+  dc_every_k: 5             # run on every k-th image
+  dc_patch: 10              # one point per patch without LiDAR depth [px]
+  dc_max_depth: 20.0        # completed depth beyond this is not used [m]
+  dc_align_thresh: 0.1      # skip the frame when completion and LiDAR disagree on average by more [m]
+  dc_edge_thresh: 0.1       # drop depth edges (Sobel magnitude, as Gaussian-LIC2)
+  dc_edge_rel: 0.05         # > 0: relative edge test (depth step per pixel / depth) instead of dc_edge_thresh (0: as Gaussian-LIC2)
+  dc_init_opacity: 0.3      # completion Gaussians start more transparent than LiDAR ones

@@ -91,6 +91,24 @@ void VIOManager::initializeVIO()
 
   img_rendered = cv::Mat::zeros(cam->height(), cam->width(), CV_8UC3);
 
+  if (dc_en)
+  {
+    try
+    {
+      depth_completer.reset(new gslivo::DepthCompleter(dc_engine));
+      if (depth_completer->width() != width || depth_completer->height() != height)
+        throw std::runtime_error("engine is " + std::to_string(depth_completer->width()) + "x" + std::to_string(depth_completer->height()) +
+                                 ", images are " + std::to_string(width) + "x" + std::to_string(height));
+      cout << GREEN << "[ GS ] depth completion: " << dc_engine << ", every " << dc_every_k << " frames" << endl << RESET;
+    }
+    catch (const std::exception &e)
+    {
+      ROS_ERROR("[ GS ] depth completion disabled: %s", e.what());
+      depth_completer.reset();
+      dc_en = false;
+    }
+  }
+
   if(raycast_en)
   {
     // cv::Mat img_test = cv::Mat::zeros(height, width, CV_8UC1);
@@ -2103,6 +2121,107 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // cv::imwrite("/home/chunran/Desktop/raycasting/" + std::to_string(new_frame_->id_) + ".png", img_cp);
 }
 
+// Depth completion for initialization, after Gaussian-LIC2: project the LiDAR scan to a sparse depth map,
+// complete it with SPNet, shift it onto the LiDAR depth (skip the frame when they disagree), drop depth
+// edges, and back-project the nearest pixel of every patch without LiDAR depth. Normals come from the
+// completed depth; the points go through the same leaf-capacity check as LiDAR points.
+void VIOManager::depthCompletionGS(const cv::Mat &rgb, const std::vector<gslivo::InitPoint> &scan)
+{
+  dc_stats.ran = dc_stats.skipped = false;
+  if (!depth_completer || dc_every_k <= 0 || frame_count % dc_every_k != 0) return;
+  const double t0 = omp_get_wtime();
+  dc_stats.ran = true;
+  dc_stats.frames++;
+
+  cv::Mat sparse = cv::Mat::zeros(height, width, CV_32F);
+  for (const gslivo::InitPoint &pt : scan)
+  {
+    const V3D pc = Rcw * pt.p_w + Pcw;
+    if (pc[2] < gs_params.min_depth) continue;
+    const int u = static_cast<int>(std::lround(fx * pc[0] / pc[2] + cx)), v = static_cast<int>(std::lround(fy * pc[1] / pc[2] + cy));
+    if (u < 0 || v < 0 || u >= width || v >= height) continue;
+    float &d = sparse.at<float>(v, u);
+    if (d == 0 || pc[2] < d) d = static_cast<float>(pc[2]);  // nearest return
+  }
+  const torch::Tensor sparse_t = torch::from_blob(sparse.data, {height, width}, torch::kFloat32).to(torch::kCUDA);
+  const torch::Tensor dense_t = depth_completer->complete(gslivo::imageToTensor(rgb), sparse_t).contiguous().cpu();
+  cv::Mat completed = cv::Mat(height, width, CV_32F, dense_t.data_ptr<float>()).clone();
+
+  // align to the LiDAR depth where it is known
+  const cv::Mat known = sparse > 0;
+  dc_stats.mean_diff = cv::mean(completed - sparse, known)[0];
+  if (std::abs(dc_stats.mean_diff) >= dc_align_thresh)
+  {
+    dc_stats.skipped = true;
+    dc_stats.skipped_frames++;
+    dc_stats.points = dc_stats.new_gaussians = 0;
+    dc_stats.ms = (omp_get_wtime() - t0) * 1000;
+    return;
+  }
+  completed -= dc_stats.mean_diff;
+  cv::Mat gx, gy, edge;
+  cv::Sobel(completed, gx, CV_32F, 1, 0, 3);
+  cv::Sobel(completed, gy, CV_32F, 0, 1, 3);
+  cv::magnitude(gx, gy, edge);
+  if (dc_edge_rel > 0)
+  {
+    // relative test: depth change per pixel (Sobel / 8) over depth. A slanted surface far away changes
+    // by decimetres per pixel without being an occlusion edge; the absolute test drops all of it.
+    edge = edge / (8.0 * cv::max(completed, 1e-3));
+    edge = edge * (dc_edge_thresh / dc_edge_rel);  // compare against dc_edge_thresh below
+  }
+  const cv::Mat usable = (completed > gs_params.min_depth) & (completed <= dc_max_depth) & (edge < dc_edge_thresh);
+  {
+    // where are the holes of the window render, and could completion fill them?
+    torch::Tensor alpha;
+    gs_map->render(gsCamera(), &alpha);
+    const torch::Tensor a = alpha.contiguous().cpu();
+    const cv::Mat holes = cv::Mat(height, width, CV_32F, a.data_ptr<float>()) < 0.5f;
+    const double n = static_cast<double>(width) * height;
+    dc_stats.holes = cv::countNonZero(holes) / n;
+    dc_stats.holes_usable = cv::countNonZero(holes & usable) / n;
+    dc_stats.holes_far = cv::countNonZero(holes & (completed > dc_max_depth)) / n;
+    dc_stats.holes_edge = cv::countNonZero(holes & (edge >= dc_edge_thresh) & (completed <= dc_max_depth)) / n;
+  }
+
+  auto backproject = [&](int u, int v) { const float d = completed.at<float>(v, u); return V3D((u - cx) * d / fx, (v - cy) * d / fy, d); };
+  std::vector<gslivo::InitPoint> points;
+  for (int y0 = 0; y0 < height; y0 += dc_patch)
+  {
+    for (int x0 = 0; x0 < width; x0 += dc_patch)
+    {
+      const int y1 = std::min(y0 + dc_patch, height), x1 = std::min(x0 + dc_patch, width);
+      if (cv::countNonZero(known(cv::Range(y0, y1), cv::Range(x0, x1))) > 0) continue;  // the LiDAR covers it
+      int bu = -1, bv = -1;
+      float best = std::numeric_limits<float>::max();
+      for (int v = y0; v < y1; v++)
+        for (int u = x0; u < x1; u++)
+          if (usable.at<uint8_t>(v, u) && completed.at<float>(v, u) < best) best = completed.at<float>(v, u), bu = u, bv = v;
+      if (bu < 0) continue;
+      gslivo::InitPoint ip;
+      const V3D pc = backproject(bu, bv);
+      ip.p_w = Rcw.transpose() * (pc - Pcw);
+      ip.n_w = V3D::Zero();  // falls back to the view ray
+      if (bu > 0 && bv > 0 && bu < width - 1 && bv < height - 1 && usable.at<uint8_t>(bv, bu - 1) && usable.at<uint8_t>(bv, bu + 1) &&
+          usable.at<uint8_t>(bv - 1, bu) && usable.at<uint8_t>(bv + 1, bu))
+      {
+        V3D n = (backproject(bu + 1, bv) - backproject(bu - 1, bv)).cross(backproject(bu, bv + 1) - backproject(bu, bv - 1));
+        if (n.norm() > 1e-9)
+        {
+          n.normalize();
+          if (n.dot(pc) > 0) n = -n;  // facing the camera
+          ip.n_w = Rcw.transpose() * n;
+        }
+      }
+      ip.opacity = static_cast<float>(dc_init_opacity);
+      points.push_back(ip);
+    }
+  }
+  dc_stats.points = static_cast<int>(points.size());
+  dc_stats.new_gaussians = gs_map->insertPoints(points, rgb, gsCamera(), frame_count);
+  dc_stats.ms = (omp_get_wtime() - t0) * 1000;
+}
+
 // Mapping thread, while no sensor data arrives: lets the viewer bridge serve the finished map.
 void VIOManager::idleGS()
 {
@@ -2170,6 +2289,10 @@ void VIOManager::processFrameGS(cv::Mat &img, const std::vector<gslivo::InitPoin
   const double vis_dr_deg = Eigen::AngleAxisd(rot_lio.transpose() * state->rot_end).angle() * 57.3;
   double t3 = omp_get_wtime();
 
+  // Extension: Gaussians where the LiDAR has no returns, from SPNet depth completion (updated pose)
+  depthCompletionGS(rgb, scan);
+  const double t3b = omp_get_wtime();
+
   // Sec. II-B.2: optimize the window at the updated pose (Eq. 9)
   gs_map->optimize(rgb, gsCamera(), gs_params.iterations);
   double t4 = omp_get_wtime();
@@ -2215,7 +2338,19 @@ void VIOManager::processFrameGS(cv::Mat &img, const std::vector<gslivo::InitPoin
   printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "  render+select (ms)", gs_select_time * 1000);
   printf("\033[1;32m| %-29s | %-27s |\033[0m\n", "  jacobian / ekf (ms)",
          (std::to_string(compute_jacobian_time * 1000).substr(0, 6) + " / " + std::to_string(update_ekf_time * 1000).substr(0, 6)).c_str());
-  printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "optimization (ms)", (t4 - t3) * 1000);
+  if (dc_stats.ran)
+  {
+    printf("\033[1;32m| %-29s | %-27s |\033[0m\n", "depth compl. pts/new/diff cm",
+           dc_stats.skipped ? ("skipped, diff " + std::to_string(dc_stats.mean_diff * 100).substr(0, 6)).c_str()
+                            : (std::to_string(dc_stats.points) + " / " + std::to_string(dc_stats.new_gaussians) + " / " +
+                               std::to_string(dc_stats.mean_diff * 100).substr(0, 5)).c_str());
+    printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "  depth completion (ms)", dc_stats.ms);
+    printf("\033[1;32m| %-29s | %-27s |\033[0m\n", "  holes % usable/far/edge",
+           (std::to_string(dc_stats.holes * 100).substr(0, 4) + " " + std::to_string(dc_stats.holes_usable * 100).substr(0, 4) + "/" +
+            std::to_string(dc_stats.holes_far * 100).substr(0, 4) + "/" + std::to_string(dc_stats.holes_edge * 100).substr(0, 4))
+               .c_str());
+  }
+  printf("\033[1;32m| %-29s | %-27.3f |\033[0m\n", "optimization (ms)", (t4 - t3b) * 1000);
   printf("\033[1;32m| %-29s | %-27.4f |\033[0m\n", "  L1 loss", s.loss);
   printf("\033[1;32m| %-29s | %-27.2f |\033[0m\n", "  PSNR before optim. (dB)", gs_psnr_pred);
   printf("\033[1;32m| %-29s | %-27.2f |\033[0m\n", "  PSNR (covered pixels, dB)", gs_psnr);

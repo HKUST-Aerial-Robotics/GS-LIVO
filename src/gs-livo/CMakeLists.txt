@@ -8,6 +8,8 @@ project(fast_livo CUDA CXX)
 set(GSLIVO_DEPS_DIR "/usr/local" CACHE PATH "install prefix of lib3dgs / simple-knn / tinyply")
 set(LIBTORCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libtorch" CACHE PATH "LibTorch root")
 set(GSVIZ_CPP_DIR "" CACHE PATH "gsviz/slam/cpp (optional viewer bridge)")
+#   GSLIVO_TENSORRT_DIR  optional: TensorRT 10 root (headers + libnvinfer) -> SPNet depth completion
+set(GSLIVO_TENSORRT_DIR "" CACHE PATH "TensorRT 10 root (optional depth completion)")
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release")
@@ -103,8 +105,25 @@ endif()
 add_library(gs_map src/gs_map.cpp)
 target_link_libraries(gs_map ${LIB3DGS_LIBRARY} ${TORCH_LIBRARIES})
 
+# SPNet depth completion for initialization (optional, TensorRT)
+add_library(depth_completer src/depth_completer.cpp)
+target_link_libraries(depth_completer ${TORCH_LIBRARIES})
+if(GSLIVO_TENSORRT_DIR)
+  find_path(TENSORRT_INCLUDE_DIR NvInfer.h PATHS ${GSLIVO_TENSORRT_DIR}/include ${GSLIVO_TENSORRT_DIR}/usr/include/x86_64-linux-gnu
+            ${GSLIVO_TENSORRT_DIR}/usr/include/aarch64-linux-gnu NO_DEFAULT_PATH)
+  find_library(TENSORRT_NVINFER nvinfer PATHS ${GSLIVO_TENSORRT_DIR}/lib ${GSLIVO_TENSORRT_DIR}/usr/lib/x86_64-linux-gnu
+               ${GSLIVO_TENSORRT_DIR}/usr/lib/aarch64-linux-gnu NO_DEFAULT_PATH)
+  if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER)
+    message(FATAL_ERROR "TensorRT not found under ${GSLIVO_TENSORRT_DIR}")
+  endif()
+  target_include_directories(depth_completer PRIVATE ${TENSORRT_INCLUDE_DIR})
+  target_compile_definitions(depth_completer PRIVATE WITH_TENSORRT)
+  target_link_libraries(depth_completer ${TENSORRT_NVINFER})
+  message(STATUS "depth completion: TensorRT ${TENSORRT_NVINFER}")
+endif()
+
 add_library(vio src/vio.cpp src/frame.cpp src/visual_point.cpp)
-target_link_libraries(vio gs_map ${LIB3DGS_LIBRARY} ${JSONCPP_LIBRARIES})
+target_link_libraries(vio gs_map depth_completer ${LIB3DGS_LIBRARY} ${JSONCPP_LIBRARIES})
 add_library(lio src/voxel_map.cpp)
 add_library(pre src/preprocess.cpp)
 add_library(imu_proc src/IMU_Processing.cpp)
@@ -112,7 +131,7 @@ add_library(laser_mapping src/LIVMapper.cpp)
 
 add_executable(fastlivo_mapping src/main.cpp)
 target_link_libraries(fastlivo_mapping
-  laser_mapping vio gs_map lio pre imu_proc
+  laser_mapping vio gs_map depth_completer lio pre imu_proc
   ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${Sophus_LIBRARIES} ${Boost_LIBRARIES}
   ${TORCH_LIBRARIES} ${JSONCPP_LIBRARIES}
 )

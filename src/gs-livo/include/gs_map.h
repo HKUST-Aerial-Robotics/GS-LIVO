@@ -73,11 +73,12 @@ struct GSCamera
   int width = 0, height = 0;
 };
 
-// LiDAR point in the world frame; n_w = 0 when LIO has no plane for it.
+// Point to initialize a Gaussian from, world frame; n_w = 0 when no surface normal is known.
 struct InitPoint
 {
   Eigen::Vector3d p_w;
   Eigen::Vector3d n_w;
+  float opacity = -1.f;  // initial opacity; < 0: GSMapParams::init_opacity
 };
 
 // Render (N, 14) raw Gaussian parameters (on the GPU) from `cam`; returns the (3, H, W) RGB image.
@@ -102,6 +103,7 @@ struct GSVoxel
 struct GSFrameStats
 {
   int add_voxels = 0, delete_voxels = 0, evict_voxels = 0, new_gaussians = 0;
+  int extra_new_gaussians = 0, extra_add_voxels = 0;  // insertPoints (e.g. depth completion)
   int window_gaussians = 0, window_voxels = 0;
   long long map_gaussians = 0;
   size_t map_voxels = 0;
@@ -118,6 +120,11 @@ public:
   // Sec. II-B.1 + II-C: initialize Gaussians from the LiDAR scan (RGB image, 8UC3) in empty leaves and
   // update the sliding window to the voxels inside `cam`'s field of view.
   void updateWindow(const std::vector<InitPoint> &scan, const cv::Mat &rgb, const GSCamera &cam, int frame);
+
+  // Initialize Gaussians from extra points seen in `cam` (e.g. completed depth) in empty leaves, after
+  // updateWindow() of the same frame. The voxels they fall in count as observed in this frame and join
+  // the window while it has room; nothing leaves the window here. Returns the number of new Gaussians.
+  int insertPoints(const std::vector<InitPoint> &points, const cv::Mat &rgb, const GSCamera &cam, int frame);
 
   // Sec. II-B.2: `iterations` Adam steps of the photometric L1 loss (Eq. 9) on the window.
   float optimize(const cv::Mat &rgb, const GSCamera &cam, int iterations);
@@ -144,6 +151,11 @@ private:
   void removeRows(const std::vector<GSVoxel *> &voxels);  // write back + swap-with-rear + truncate
   void appendVoxels(const std::vector<GSVoxel *> &voxels);  // stage (CGB) + one H2D copy
   void setParams(torch::Tensor p);
+  using Fresh = std::vector<std::pair<GSVoxel *, int>>;  // (voxel, slot) of Gaussians not on the GPU yet
+  // Hash keys of `points` (voxels -> hit, last_seen = frame) and new Gaussians in free leaves.
+  int initFrom(const std::vector<InitPoint> &points, const cv::Mat &rgb, const GSCamera &cam, int frame,
+               std::vector<GSVoxel *> &hit, Fresh &fresh, std::vector<GSVoxel *> &touched);
+  void uploadFresh(const Fresh &fresh);  // new Gaussians of voxels that stay in the window
 
   GSMapParams p_;
   double leaf_size_;

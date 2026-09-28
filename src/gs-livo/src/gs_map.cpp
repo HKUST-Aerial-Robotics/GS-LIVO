@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <stdexcept>
 
 #include "rasterizer.cuh"
 
@@ -201,7 +202,8 @@ Gaussian GSMap::makeGaussian(const InitPoint &pt, const cv::Mat &rgb, const GSCa
     const float c = ((1 - du) * (1 - dv) * c00[j] + du * (1 - dv) * c01[j] + (1 - du) * dv * c10[j] + du * dv * c11[j]) / 255.f;
     g.sh_dc[j] = (c - 0.5f) / kSHC0;
   }
-  g.logit_opacity = static_cast<float>(std::log(p_.init_opacity / (1.0 - p_.init_opacity)));
+  const double o = pt.opacity > 0 ? pt.opacity : p_.init_opacity;
+  g.logit_opacity = static_cast<float>(std::log(o / (1.0 - o)));
   return g;
 }
 
@@ -213,33 +215,9 @@ void GSMap::updateWindow(const std::vector<InitPoint> &scan, const cv::Mat &rgb,
   const Eigen::Vector3d centre = -cam.Rcw.transpose() * cam.Pcw;
 
   // Sec. II-B.1 + Step 3: spatial hash keys of the current LiDAR frame; new Gaussians in free leaves.
-  std::vector<GSVoxel *> hit;
-  std::vector<std::pair<GSVoxel *, int>> fresh;  // new Gaussians of voxels already in the window
-  std::vector<GSVoxel *> touched;  // voxels with n_fresh > 0
-  for (const InitPoint &pt : scan)
-  {
-    const Eigen::Vector3d pc = cam.Rcw * pt.p_w + cam.Pcw;
-    if (pc[2] < p_.min_depth || pc[2] > p_.max_depth) continue;
-    const Eigen::Vector2d uv(cam.fx * pc[0] / pc[2] + cam.cx, cam.fy * pc[1] / pc[2] + cam.cy);
-    if (uv[0] < 0 || uv[1] < 0 || uv[0] >= cam.width - 1 || uv[1] >= cam.height - 1) continue;
-    GSVoxel *v = voxelAt(keyOf(pt.p_w), true);
-    if (v->last_seen != frame)
-    {
-      v->last_seen = frame;
-      hit.push_back(v);
-    }
-    uint8_t &count = v->leaf_count[leafIndex(*v, pt.p_w)];
-    if (count >= p_.leaf_capacity) continue;
-    count++;
-    v->gs.push_back(makeGaussian(pt, rgb, cam, uv));
-    n_gaussians_++;
-    stats.new_gaussians++;
-    if (v->in_window)
-    {
-      if (v->n_fresh++ == 0) touched.push_back(v);
-      fresh.emplace_back(v, static_cast<int>(v->gs.size()) - 1);
-    }
-  }
+  std::vector<GSVoxel *> hit, touched;
+  Fresh fresh;
+  stats.new_gaussians = initFrom(scan, rgb, cam, frame, hit, fresh, touched);
 
   // Step 1: window voxels whose centre left the FoV are marked DELETE.
   const double half = 0.5 * p_.root_voxel_size;
@@ -290,43 +268,105 @@ void GSMap::updateWindow(const std::vector<InitPoint> &scan, const cv::Mat &rgb,
   // fresh Gaussians of voxels that leave the window stay in RAM only
   fresh.erase(std::remove_if(fresh.begin(), fresh.end(), [](const auto &f) { return !f.first->in_window; }), fresh.end());
   for (GSVoxel *v : touched) v->n_fresh = 0;
-  for (auto &f : fresh) f.first->rows.push_back(-1);  // placeholder row, set by appendVoxels
 
   // Steps 1-2: write back + swap-with-rear compaction.
   removeRows(remove);
   // Step 4: append ADD voxels and the fresh Gaussians of OVERLAP voxels.
-  std::vector<GSVoxel *> append = add;
-  appendVoxels(append);
-  if (!fresh.empty())
-  {
-    // fresh Gaussians of voxels that stay in the window
-    std::vector<Gaussian> staged;
-    staged.reserve(fresh.size());
-    const int base = windowSize();
-    for (size_t i = 0; i < fresh.size(); i++)
-    {
-      GSVoxel *v = fresh[i].first;
-      const int slot = fresh[i].second;
-      staged.push_back(v->gs[slot]);
-      v->rows[slot] = base + static_cast<int>(i);
-      row_owner_.push_back(v);
-      row_slot_.push_back(slot);
-    }
-    torch::Tensor t = torch::from_blob(staged.data(), {static_cast<int64_t>(staged.size()), kGaussianFloats}, torch::kFloat32)
-                          .to(torch::kCUDA);
-    stats.h2d_mb += staged.size() * sizeof(Gaussian) / 1e6;
-    torch::NoGradGuard ng;
-    setParams(torch::cat({params_.detach(), t}));
-    adam_m_ = torch::cat({adam_m_, torch::zeros_like(t)});
-    adam_v_ = torch::cat({adam_v_, torch::zeros_like(t)});
-    adam_t_ = torch::cat({adam_t_, torch::zeros({t.size(0), 1}, t.options())});
-  }
+  appendVoxels(add);
+  uploadFresh(fresh);
   stats.add_voxels = static_cast<int>(add.size());
   stats.window_gaussians = windowSize();
   stats.window_voxels = static_cast<int>(window_voxels_.size());
   stats.map_gaussians = n_gaussians_;
   stats.map_voxels = sht_.size();
   stats.t_window_ms = msSince(t0);
+}
+
+int GSMap::initFrom(const std::vector<InitPoint> &points, const cv::Mat &rgb, const GSCamera &cam, int frame,
+                    std::vector<GSVoxel *> &hit, Fresh &fresh, std::vector<GSVoxel *> &touched)
+{
+  int n_new = 0;
+  for (const InitPoint &pt : points)
+  {
+    const Eigen::Vector3d pc = cam.Rcw * pt.p_w + cam.Pcw;
+    if (pc[2] < p_.min_depth || pc[2] > p_.max_depth) continue;
+    const Eigen::Vector2d uv(cam.fx * pc[0] / pc[2] + cam.cx, cam.fy * pc[1] / pc[2] + cam.cy);
+    if (uv[0] < 0 || uv[1] < 0 || uv[0] >= cam.width - 1 || uv[1] >= cam.height - 1) continue;
+    GSVoxel *v = voxelAt(keyOf(pt.p_w), true);
+    if (v->last_seen != frame)
+    {
+      v->last_seen = frame;
+      hit.push_back(v);
+    }
+    uint8_t &count = v->leaf_count[leafIndex(*v, pt.p_w)];
+    if (count >= p_.leaf_capacity) continue;
+    count++;
+    v->gs.push_back(makeGaussian(pt, rgb, cam, uv));
+    n_gaussians_++;
+    n_new++;
+    if (v->in_window)
+    {
+      if (v->n_fresh++ == 0) touched.push_back(v);
+      fresh.emplace_back(v, static_cast<int>(v->gs.size()) - 1);
+    }
+  }
+  return n_new;
+}
+
+void GSMap::uploadFresh(const Fresh &fresh)
+{
+  if (fresh.empty()) return;
+  // A voxel's fresh Gaussians are its last slots, in order: their rows are appended to v->rows.
+  std::vector<Gaussian> staged;
+  staged.reserve(fresh.size());
+  const int base = windowSize();
+  for (size_t i = 0; i < fresh.size(); i++)
+  {
+    GSVoxel *v = fresh[i].first;
+    const int slot = fresh[i].second;
+    if (static_cast<int>(v->rows.size()) != slot) throw std::logic_error("GSMap: fresh rows out of order");
+    staged.push_back(v->gs[slot]);
+    v->rows.push_back(base + static_cast<int>(i));
+    row_owner_.push_back(v);
+    row_slot_.push_back(slot);
+  }
+  torch::Tensor t = torch::from_blob(staged.data(), {static_cast<int64_t>(staged.size()), kGaussianFloats}, torch::kFloat32)
+                        .to(torch::kCUDA);
+  stats.h2d_mb += staged.size() * sizeof(Gaussian) / 1e6;
+  torch::NoGradGuard ng;
+  setParams(torch::cat({params_.detach(), t}));
+  adam_m_ = torch::cat({adam_m_, torch::zeros_like(t)});
+  adam_v_ = torch::cat({adam_v_, torch::zeros_like(t)});
+  adam_t_ = torch::cat({adam_t_, torch::zeros({t.size(0), 1}, t.options())});
+}
+
+int GSMap::insertPoints(const std::vector<InitPoint> &points, const cv::Mat &rgb, const GSCamera &cam, int frame)
+{
+  std::vector<GSVoxel *> hit, touched;
+  Fresh fresh;
+  const int n_new = initFrom(points, rgb, cam, frame, hit, fresh, touched);
+  for (GSVoxel *v : touched) v->n_fresh = 0;
+  // voxels seen only through these points join the window, nearest first, while it has room
+  const Eigen::Vector3d centre = -cam.Rcw.transpose() * cam.Pcw;
+  std::vector<GSVoxel *> add;
+  for (GSVoxel *v : hit)
+    if (!v->in_window) add.push_back(v);
+  std::sort(add.begin(), add.end(), [&](GSVoxel *a, GSVoxel *b) {
+    return (a->origin - centre).squaredNorm() < (b->origin - centre).squaredNorm();
+  });
+  long long room = p_.max_window - windowSize() - static_cast<long long>(fresh.size());
+  size_t k = 0;
+  for (; k < add.size() && static_cast<long long>(add[k]->gs.size()) <= room; k++) room -= add[k]->gs.size();
+  add.resize(k);
+  appendVoxels(add);
+  uploadFresh(fresh);
+  stats.extra_new_gaussians = n_new;
+  stats.extra_add_voxels = static_cast<int>(add.size());
+  stats.window_gaussians = windowSize();
+  stats.window_voxels = static_cast<int>(window_voxels_.size());
+  stats.map_gaussians = n_gaussians_;
+  stats.map_voxels = sht_.size();
+  return n_new;
 }
 
 void GSMap::removeRows(const std::vector<GSVoxel *> &voxels)

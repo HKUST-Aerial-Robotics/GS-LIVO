@@ -135,6 +135,15 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("gs/min_alpha", gs_min_alpha, 0.95);
   nh.param<int>("gs/render_every", gs_render_every, 5);
   nh.param<string>("gs/save_ply", gs_save_ply, "");
+  nh.param<bool>("gs/dc_en", dc_en, false);
+  nh.param<string>("gs/dc_engine", dc_engine, "");
+  nh.param<int>("gs/dc_every_k", dc_every_k, 5);
+  nh.param<int>("gs/dc_patch", dc_patch, 10);
+  nh.param<double>("gs/dc_max_depth", dc_max_depth, 20.0);
+  nh.param<double>("gs/dc_align_thresh", dc_align_thresh, 0.1);
+  nh.param<double>("gs/dc_edge_thresh", dc_edge_thresh, 0.1);
+  nh.param<double>("gs/dc_edge_rel", dc_edge_rel, 0.0);
+  nh.param<double>("gs/dc_init_opacity", dc_init_opacity, 0.3);
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
@@ -174,6 +183,15 @@ void LIVMapper::initializeComponents()
   vio_manager->gs_meas_grid = gs_meas_grid;
   vio_manager->gs_min_alpha = gs_min_alpha;
   vio_manager->gs_render_every = gs_render_every;
+  vio_manager->dc_en = dc_en;
+  vio_manager->dc_engine = dc_engine;
+  vio_manager->dc_every_k = dc_every_k;
+  vio_manager->dc_patch = dc_patch;
+  vio_manager->dc_max_depth = dc_max_depth;
+  vio_manager->dc_align_thresh = dc_align_thresh;
+  vio_manager->dc_edge_thresh = dc_edge_thresh;
+  vio_manager->dc_edge_rel = dc_edge_rel;
+  vio_manager->dc_init_opacity = dc_init_opacity;
 
 
 

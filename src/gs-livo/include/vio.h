@@ -15,6 +15,7 @@ which is included as part of this source code package.
 
 #include "voxel_map.h"
 #include "gs_map.h"
+#include "depth_completer.h"
 
 #include "feature.h"
 #include <opencv2/imgproc/imgproc_c.h>
@@ -97,6 +98,27 @@ public:
   std::vector<float> gs_ref_patch;  // their patches in the rendered image, warp_len floats each
   double gs_psnr = -1, gs_psnr_full = -1, gs_psnr_pred = -1, gs_coverage = 0, ave_gs_time = 0, gs_select_time = 0;
 
+  // Depth completion for initialization (Gaussian-LIC2 style, SPNet + TensorRT); see docs/depth_completion.md
+  bool dc_en = false;
+  std::string dc_engine;
+  int dc_every_k = 5;  // run on every k-th image
+  int dc_patch = 10;  // one point per patch (pixels) without LiDAR depth
+  double dc_max_depth = 20.0;  // completed depth beyond this is not used
+  double dc_align_thresh = 0.1;  // skip the frame if completion and LiDAR differ by more on average [m]
+  double dc_edge_thresh = 0.1;  // drop pixels on depth edges (Sobel magnitude of the depth, Gaussian-LIC2)
+  double dc_edge_rel = 0.0;  // > 0: relative edge test instead, |grad depth| per pixel / depth >= dc_edge_rel
+  double dc_init_opacity = 0.3;  // initial opacity of completion Gaussians (LiDAR ones: gs/init_opacity)
+  std::unique_ptr<gslivo::DepthCompleter> depth_completer;
+  struct
+  {
+    bool ran = false, skipped = false;
+    int points = 0, new_gaussians = 0, frames = 0, skipped_frames = 0;
+    double mean_diff = 0, ms = 0;
+    // pixels the window render does not cover (alpha < 0.5), as fractions of the image, and what the
+    // completed depth says about them: usable (within dc_max_depth, not an edge), too far, edge
+    double holes = 0, holes_usable = 0, holes_far = 0, holes_edge = 0;
+  } dc_stats;
+
   cv::Mat img_undistort;  // BGR, undistorted
   cv::Mat img_rendered;  // BGR, the window rendered at the latest pose
 
@@ -166,6 +188,7 @@ public:
   void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
   void processFrameGS(cv::Mat &img, const std::vector<gslivo::InitPoint> &scan, double img_time);
   void idleGS();
+  void depthCompletionGS(const cv::Mat &rgb, const std::vector<gslivo::InitPoint> &scan);
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   gslivo::GSCamera gsCamera() const;
   void selectGSMeasurements(const cv::Mat &img_gray, const cv::Mat &render_gray, const cv::Mat &alpha,

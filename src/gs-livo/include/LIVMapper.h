@@ -107,6 +107,11 @@ public:
   int gs_meas_grid = 16, gs_render_every = 5;
   double gs_min_alpha = 0.95;
   string gs_save_ply;
+  // depth completion (gs/dc_*), see VIOManager
+  bool dc_en = false;
+  string dc_engine;
+  int dc_every_k = 5, dc_patch = 10;
+  double dc_max_depth = 20.0, dc_align_thresh = 0.1, dc_edge_thresh = 0.1, dc_edge_rel = 0.0, dc_init_opacity = 0.3;
 
 
 
