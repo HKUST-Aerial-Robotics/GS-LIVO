@@ -165,6 +165,7 @@ public:
   void updateStateGS(cv::Mat img, int level);
   void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
   void processFrameGS(cv::Mat &img, const std::vector<gslivo::InitPoint> &scan, double img_time);
+  void idleGS();
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   gslivo::GSCamera gsCamera() const;
   void selectGSMeasurements(const cv::Mat &img_gray, const cv::Mat &render_gray, const cv::Mat &alpha,

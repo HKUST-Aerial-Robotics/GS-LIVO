@@ -591,6 +591,7 @@ void LIVMapper::run()
     ros::spinOnce();
     if (!sync_packages(LidarMeasures)) 
     {
+      vio_manager->idleGS();  // no data (e.g. the bag has ended): keep the Gaussian map viewable
       rate.sleep();
       continue;
     }

@@ -13,6 +13,7 @@ which is included as part of this source code package.
 #include "vio.h"
 #ifdef WITH_GSVIZ
 #include "gslivo_bridge.hpp"  // gsviz viewer bridge (gsviz/slam/cpp), cmake -DGSVIZ_CPP_DIR=...
+static gsviz::GsLivoBridge *gsviz_bridge = nullptr;  // created on the first frame
 #endif
 
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -2102,6 +2103,14 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // cv::imwrite("/home/chunran/Desktop/raycasting/" + std::to_string(new_frame_->id_) + ".png", img_cp);
 }
 
+// Mapping thread, while no sensor data arrives: lets the viewer bridge serve the finished map.
+void VIOManager::idleGS()
+{
+#ifdef WITH_GSVIZ
+  if (gsviz_bridge) gsviz_bridge->onIdle();
+#endif
+}
+
 void VIOManager::processFrameGS(cv::Mat &img, const std::vector<gslivo::InitPoint> &scan, double img_time)
 {
   if (width != img.cols || height != img.rows)
@@ -2217,7 +2226,7 @@ void VIOManager::processFrameGS(cv::Mat &img, const std::vector<gslivo::InitPoin
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
 #ifdef WITH_GSVIZ
   {
-    static gsviz::GsLivoBridge *gsviz_bridge = std::getenv("GSVIZ_DISABLE") ? nullptr : new gsviz::GsLivoBridge(this);
+    if (!gsviz_bridge && !std::getenv("GSVIZ_DISABLE")) gsviz_bridge = new gsviz::GsLivoBridge(this);
     if (gsviz_bridge) gsviz_bridge->onFrame(img_time);
   }
 #endif
