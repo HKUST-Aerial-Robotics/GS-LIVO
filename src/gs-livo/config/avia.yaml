@@ -104,7 +104,7 @@ gs:
   min_depth: 0.3
   max_depth: 50.0
   # Sliding window + optimization (Sec. II-B.2, II-C); paper: 100k Gaussians, 10 iterations per frame
-  max_window: 100000
+  max_window: 200000        # CBD_Building_01: 100k is full every frame (5.5% holes); 200k: +1 dB predicted PSNR, +4 ms
   iterations: 10
   lr_xyz: 0.0001
   lr_scale: 0.005
