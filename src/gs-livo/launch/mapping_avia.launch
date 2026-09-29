@@ -2,13 +2,15 @@
 <!-- Launch file for Livox AVIA LiDAR -->
 
 	<arg name="rviz" default="true" />
+	<arg name="config" default="$(find fast_livo)/config/avia.yaml" />  <!-- e.g. config/scene_data.yaml -->
+	<arg name="camera" default="$(find fast_livo)/config/camera_pinhole.yaml" />
 
-	<rosparam command="load" file="$(find fast_livo)/config/avia.yaml" />
+	<rosparam command="load" file="$(arg config)" />
 	<arg name="save_ply" default="" />  <!-- write the Gaussian map (3DGS PLY) on shutdown -->
 	<param name="gs/save_ply" value="$(arg save_ply)" />
 
 	<node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
-		<rosparam file="$(find fast_livo)/config/camera_pinhole.yaml" />
+		<rosparam file="$(arg camera)" />
 	</node>
 	
 	<group if="$(arg rviz)">
